@@ -127,26 +127,7 @@ def calc_standard_deviation(values, mean=None):
     return math.sqrt(variance)
 
 
-class PlayerStats(object):
-    def __init__(self, player):
-        self.player = player
-        self.relative_deviation = 0
-
-    @property
-    def relative_deviation_category(self):
-        if self.relative_deviation < 0:
-            return math.ceil(self.relative_deviation)
-        return math.floor(self.relative_deviation)
-
-
 BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "balance_distance"])
-
-
-def player_ids_only(team):
-    if team and isinstance(team[0], PlayerInfo):
-        return [p.steam_id for p in team]
-    return team
-
 
 def _balance_distance(team_a, team_b):
     team_a_sum = sum(player.elo for player in team_a)
@@ -157,44 +138,10 @@ def _balance_distance(team_a, team_b):
     return abs(0.5 - ((1.0 * team_b_sum) / total))
 
 
-def _shape_balance_score(team_a, team_b):
-    # "Rank" here means the player's position inside their own team after sorting by elo:
-    # rank 1 is the strongest player on that team, rank 2 is the next strongest, and so on.
-    # We compare teams rank-by-rank after sorting by elo. This pushes the balancer toward
-    # matching the overall shape of each roster instead of only equalizing team averages.
-    # Example: a rank-1 player is compared with the other team's rank-1 player, rank-2 with
-    # rank-2, etc. That is what helps avoid "one stacked top end plus weak anchors" teams.
-    # The score is ordered from most important to least important:
-    #   1. avoid any single badly mismatched rank pairing
-    #   2. minimize the total weighted rank mismatch, with more weight on stronger players
-    #   3. keep total elo close
-    #   4. keep team spread / variance close
-    sorted_team_a = sort_by_skill_rating_descending(team_a)
-    sorted_team_b = sort_by_skill_rating_descending(team_b)
-    rank_gaps = [abs(player_a.elo - player_b.elo) for player_a, player_b in zip(sorted_team_a, sorted_team_b)]
-    weighted_gap = sum((len(rank_gaps) - index) * gap for index, gap in enumerate(rank_gaps))
-    team_a_elos = skill_rating_list(sorted_team_a)
-    team_b_elos = skill_rating_list(sorted_team_b)
-    team_a_sum = sum(team_a_elos)
-    team_b_sum = sum(team_b_elos)
-    team_a_stdev = calc_standard_deviation(team_a_elos, mean=calc_mean(team_a_elos)) if len(team_a_elos) > 1 else 0
-    team_b_stdev = calc_standard_deviation(team_b_elos, mean=calc_mean(team_b_elos)) if len(team_b_elos) > 1 else 0
-    return (
-        max(rank_gaps) if rank_gaps else 0,
-        weighted_gap,
-        abs(team_a_sum - team_b_sum),
-        abs(team_a_stdev - team_b_stdev),
-    )
-
-
 def _team_signature(team):
     sorted_team = sort_by_skill_rating_descending(team)
     return tuple((player.elo, player.name or "", player.steam_id if player.steam_id is not None else -1)
                  for player in sorted_team)
-
-
-def _candidate_key(team_a, team_b):
-    return _shape_balance_score(team_a, team_b) + (_team_signature(team_a), _team_signature(team_b))
 
 
 def _pairwise_balance_score(team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, team_size, max_gap, weighted_gap):
@@ -654,163 +601,4 @@ def balance_players_by_skill_variance(players, prune_search_space=True, max_resu
     raise ValueError("Unknown balance strategy: %s" % strategy)
 
 
-SwitchOperation = collections.namedtuple("SwitchOperation", ["players_affected",
-                                                             "players_moved_from_a_to_b", "players_moved_from_b_to_a"])
-
-SwitchProposal = collections.namedtuple("SwitchProposal", ["switch_operation", "balanced_team_combo"])
-
-
-def get_proposed_team_combo_moves(team_combo_1, team_combo_2):
-    # team_combo_1 is current, team_combo_2 is a proposed combination
-    assert len(team_combo_1) == 2 and len(team_combo_2) == 2
-    team1a, team1b = set(team_combo_1[0]), set(team_combo_1[1])
-    if isinstance(team_combo_2, BalancedTeamCombo):
-        team2a, team2b = set(team_combo_2.teams_tup[0]), set(team_combo_2.teams_tup[1])
-    else:
-        team2a, team2b = set(team_combo_2[0]), set(team_combo_2[1])
-    assert team1a.union(team1b) == team2a.union(team2b), "inconsistent input data"
-    assert not team1a.intersection(team1b), "inconsistent input data"
-    assert not team2a.intersection(team2b), "inconsistent input data"
-    players_moved_from_a_to_b = team2a.difference(team1a)
-    players_moved_from_b_to_a = team2b.difference(team1b)
-    players_affected = players_moved_from_a_to_b.union(players_moved_from_b_to_a)
-    return SwitchOperation(players_affected=players_affected,
-                           players_moved_from_a_to_b=players_moved_from_a_to_b,
-                           players_moved_from_b_to_a=players_moved_from_b_to_a)
-
-
-def describe_switch_operation(switch_op, team_names=None):
-    assert isinstance(switch_op, SwitchOperation)
-    left_team_desc = ""
-    right_team_desc = ""
-    if team_names:
-        assert len(team_names) == 2
-        left_team_desc = "%s " % team_names[0]
-        right_team_desc = " %s" % team_names[1]
-
-    def get_names(player_set):
-        s = []
-        for i, player in enumerate(sorted(list(player_set), key=lambda p: p.elo, reverse=True)):
-            if i != 0:
-                s.append(", ")
-            s.append("%s(%d)" % (player.name, player.elo))
-        return "".join(s)
-
-    out = []
-    if switch_op.players_moved_from_a_to_b:
-        out.append("%s --->%s" % (get_names(switch_op.players_moved_from_a_to_b), right_team_desc))
-    if switch_op.players_moved_from_a_to_b and switch_op.players_moved_from_b_to_a:
-        out.append(" | ")
-    if switch_op.players_moved_from_b_to_a:
-        out.append("%s<--- %s" % (left_team_desc, get_names(switch_op.players_moved_from_b_to_a)))
-    return "".join(out)
-
-
-def generate_switch_proposals(teams, max_results=5):
-    # add 1 to max results, because if the input teams are optimal, then they will come as a result.
-    players = []
-    [[players.append(p) for p in team_players] for team_players in teams]
-    balanced_team_combos = balance_players_by_skill_variance(players,
-                                                             prune_search_space=True,
-                                                             max_results=max_results+1)
-    switch_proposals = []
-    for balanced_combo in balanced_team_combos:
-        switch_op = get_proposed_team_combo_moves(teams, balanced_combo)
-        assert isinstance(switch_op, SwitchOperation)
-        assert isinstance(balanced_combo, BalancedTeamCombo)
-        if not switch_op.players_affected:
-            # no change
-            continue
-        switch_proposals.append(SwitchProposal(switch_operation=switch_op, balanced_team_combo=balanced_combo))
-
-    return switch_proposals
-
-
-class Unstaker(object):
-    """
-    This class encapsulates a set of unstak balancing suggestions, and data related to current server
-    operations on these suggestions. It can be seen as a finite state machine managing these steps:
-
-        - STARTGEN: Invalidation of old suggestions. (e.g. vote enacted, teams change, new match).
-        - GENERATING: Generation of new suggestions (possibly a long running operation).
-        - STOREGEN: Recording the generated results (multiple choices of balancing)
-        - PRESENTGEN: Presentation of the group of suggestions, ready for selection.
-        - VOTECHOICE: Accepting democratic player votes for selecting the balance suggestion.
-                      (It can be forced by admin).
-        - RESETCHOICE: An admin nominated transition from VOTECHOICE to PRESENTGEN. 
-                       (not part of the standard flow).
-        - PLAYERCONFIRMATION: Waiting for nominated switch players to confirm unanimous agreement.
-                              (It can be forced by admin).
-        - EXECUTESWITCH: Perform the swap action. After this we are back at STARTGEN.
-
-    When PRESENTGEN occurs, the options are listed in descending order of predicted fitness.
-    In other words, the calculated best balanced option is presented first.
-
-    A natural consequence of this structure is that we can encode an admin forced balance operation 
-    ("unstak") as a forced progression through all FSM steps assuming all players voted the first
-    choice in VOTECHOICE, followed by all players agreeing in PLAYERCONFIRMATION. So a balance operation
-    can simply set a bit that auto progresses through all states.
-
-    There are a few complexities to bear in mind when thinking about unstak balancing compared to the
-    existing balance operation:
-        - unstak will try to balance mismatched odd-even teams (n vs n+1). 
-            - legacy balance will only attempt to balance teams with matching player counts (n vs n).
-        - unstak can suggest player switches that can involve a single player or up to half of all players.
-            - legacy balance will only suggest a switch between player pairs.
-        - unstak tries to match "skill distribution shape" of the teams, and not just aggregated values.
-            - legacy balance can consider a fully uniform team vs a highly skewed team as balanced, 
-              unstak will not. 
-            - As an example of a skewed vs uniform matching: Team A has 6 players around 1400 skillrating
-              (normal distribution). Team B has players at [2200, 1950, 1800, 1100, 750, 600] skillratings.
-              Both teams have the same skillrating average (1400) and sum. However, while Team B has a 
-              chance of winning, the load on the top 3 players is large, due to the anchoring effect of
-              the bottom 3 players on Team B. From experience, it can work, but it is most commonly a
-              frustrating experience for all members of the skewed team, especially if Team A works together.
-              Teamwork is a lot less effective for Team B due to skill disparity and focusing effects. 
-              The "shape matching" property of unstak addresses this, but could be considered a disadvantage,
-              because sometimes you can have interesting matches with skewed players, but this is rare.
-
-    These differences are basically due to the fact that legacy balance uses a naive hill-climbing 
-    style algorithm using player pair switches for iterative improvements (locally optimal solutions). 
-    In contrast, unstak tries to completely re-assemble teams by first categorizing players based on 
-    relative stat deviations, and then performing an exhaustive search between these categories and
-    using a set of heuristics to keep the top N results. The search space is drastically reduced compared
-    to a naive (N choose K) search by restricting to combinations which contain subsets of players in
-    the same "skill deviation group" to be equally spread in a way that is non-consequetively biased 
-    across adjacent deviation groups. This allows it to find a globally optimal solution (satisfying 
-    the hueristic) in a smaller search space than a pure brute force that returns "shape matched" results.
-    There is a very small chance that the heuristic-based global optimum lies outside of the trimmed
-    search space, but that would probably be explained by a deficiency in the heuristic and would also
-    probably represent a low quality match.
-
-    Therefore, unstak is generally a more involved and expensive operation due to its exhaustive search approach 
-    and may require being run as a delayed/background operation since it may take more than one frame to complete.
-    """
-    STARTGEN = 0
-    GENERATING = 1
-    STOREGEN = 2
-    PRESENTGEN = 3
-    VOTECHOICE = 4
-    RESETCHOICE = 5
-    PLAYERCONFIRMATION = 6
-    EXECUTESWITCH = 7
-
-    def __init__(self):
-        self.state = self.STARTGEN
-        self.switch_proposals = []
-        self.current_switch_agreement = {}
-        self.startgen_hash = None
-        self.proposals_vote_choice = {}
-        self.proposal_voted_player_ids = set()
-
-    @classmethod
-    def generate_startgen_hash(cls, players):
-        """
-        Fully deterministic value that makes it possible to do cheap equality checks to see if teams have changed. 
-        """
-        players_signature = set()
-        for player in players:
-            assert isinstance(player, PlayerInfo)
-            players_signature.add((player.elo, player.elo_variance, player.team_name))
-        return players_signature
 
