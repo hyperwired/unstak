@@ -4,7 +4,7 @@ TARGET_START_MARKER = "# UNSTAK_START"
 TARGET_END_MARKER = "# UNSTAK_END"
 
 TARGET_FILE = "balance.py"
-SOURCE_FILE = "balancer_unstak.py"
+SOURCE_FILE = "unstak_balancer.py"
 
 
 def inject_code(source_file, target_file, target_start_marker, target_end_marker):
@@ -44,3 +44,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

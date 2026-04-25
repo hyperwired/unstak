@@ -2,7 +2,7 @@ import random
 import math
 import unittest
 import itertools
-from balancer_unstak import *
+from unstak_balancer import *
 import collections
 
 TEST_PLAYER_NAMES = [
@@ -224,3 +224,4 @@ def run_tests():
 
 if __name__ == '__main__':
     unittest.main()
+
