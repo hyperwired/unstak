@@ -361,7 +361,88 @@ def _pairwise_balance_score(team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, 
     )
 
 
-def balance_players_by_skill_distribution(players, verbose=False, max_results=None):
+BALANCE_STRATEGY_PAIRWISE = "pairwise"
+BALANCE_STRATEGY_QUARTETS = "quartets"
+BALANCE_STRATEGY_ADAPTIVE_BLOCKS = "adaptive_blocks"
+BALANCE_STRATEGY_STDDEV_BUCKETS = "stddev_buckets"
+
+
+def _build_local_group_options(group, local_patterns, team_size, rank_offset):
+    group_options = []
+    for option_index, (team_a_indexes, team_b_indexes) in enumerate(local_patterns):
+        team_a_players = tuple(sorted((group[index] for index in team_a_indexes), key=lambda player: player.elo, reverse=True))
+        team_b_players = tuple(sorted((group[index] for index in team_b_indexes), key=lambda player: player.elo, reverse=True))
+        local_rank_gaps = tuple(abs(team_a_players[index].elo - team_b_players[index].elo)
+                                for index in range(len(team_a_players)))
+        weighted_gap = sum((team_size - (rank_offset + index)) * gap
+                           for index, gap in enumerate(local_rank_gaps))
+        group_options.append({
+            "index": option_index,
+            "team_a_players": team_a_players,
+            "team_b_players": team_b_players,
+            "team_a_sum": sum(player.elo for player in team_a_players),
+            "team_b_sum": sum(player.elo for player in team_b_players),
+            "team_a_sumsq": sum(player.elo * player.elo for player in team_a_players),
+            "team_b_sumsq": sum(player.elo * player.elo for player in team_b_players),
+            "max_gap": max(local_rank_gaps) if local_rank_gaps else 0,
+            "weighted_gap": weighted_gap,
+        })
+    return tuple(group_options)
+
+
+def _search_group_option_sets(group_option_sets, team_size, max_results, verbose=False):
+    results = FixedSizePriorityQueue(max_results)
+
+    for choice_tuple in itertools.product(*group_option_sets):
+        team_a_sum = 0
+        team_b_sum = 0
+        team_a_sumsq = 0
+        team_b_sumsq = 0
+        max_gap = 0
+        weighted_gap = 0
+        choice_signature = []
+
+        for option in choice_tuple:
+            team_a_sum += option["team_a_sum"]
+            team_b_sum += option["team_b_sum"]
+            team_a_sumsq += option["team_a_sumsq"]
+            team_b_sumsq += option["team_b_sumsq"]
+            max_gap = max(max_gap, option["max_gap"])
+            weighted_gap += option["weighted_gap"]
+            choice_signature.append(option["index"])
+
+        score = _pairwise_balance_score(
+            team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, team_size, max_gap, weighted_gap
+        )
+        results.add_item((score + (tuple(choice_signature),), choice_tuple))
+
+        if verbose:
+            team_a = []
+            team_b = []
+            for option in choice_tuple:
+                team_a.extend(option["team_a_players"])
+                team_b.extend(option["team_b_players"])
+            match_prediction = generate_match_prediction(_bake_team_stats(team_a), _bake_team_stats(team_b))
+            print("Combo %s : %s" % (tuple(choice_signature), describe_balanced_team_combo(team_a, team_b, match_prediction)))
+
+    return results
+
+
+def _materialize_group_option_results(results):
+    result_combos = []
+    for _, choice_tuple in results.nsmallest():
+        team_a = []
+        team_b = []
+        for option in choice_tuple:
+            team_a.extend(option["team_a_players"])
+            team_b.extend(option["team_b_players"])
+        teams = (tuple(team_a), tuple(team_b))
+        match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
+        result_combos.append(BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction))
+    return result_combos
+
+
+def balance_players_by_skill_distribution_pairwise(players, verbose=False, max_results=None):
     """
     Find the best equal-sized split by comparing the teams rank-by-rank instead of only by average elo.
 
@@ -406,7 +487,7 @@ def balance_players_by_skill_distribution(players, verbose=False, max_results=No
     if not players:
         return []
     if len(players) % 2 != 0:
-        raise ValueError("balance_players_by_skill_distribution requires an even number of players")
+        raise ValueError("balance_players_by_skill_distribution_pairwise requires an even number of players")
 
     team_size = len(players) // 2
     pairs = [players[index:index + 2] for index in range(0, len(players), 2)]
@@ -473,8 +554,296 @@ def balance_players_by_skill_distribution(players, verbose=False, max_results=No
     return result_combos
 
 
-def balance_players_by_skill_variance(players, verbose=False, prune_search_space=True, max_results=None):
-    return balance_players_by_skill_distribution(players, verbose=verbose, max_results=max_results)
+def balance_players_by_skill_distribution_quartets(players, verbose=False, max_results=None):
+    """
+    Reduced local-group search using 4-player blocks. Each quartet contributes two players to each
+    side using a small set of plausible 2-vs-2 patterns, and if the total player count is not
+    divisible by 4 the final leftover pair is split 1-vs-1.
+
+    For 24 players this checks 4^6 = 4,096 quartet orientations, which keeps the search in the same
+    order of magnitude as the pairwise strategy while relaxing the visible "adjacent pair must split"
+    rule.
+    """
+    if max_results is None:
+        max_results = 1
+    players = tuple(sort_by_skill_rating_descending(players))
+    if not players:
+        return []
+    if len(players) % 2 != 0:
+        raise ValueError("balance_players_by_skill_distribution_quartets requires an even number of players")
+
+    team_size = len(players) // 2
+    raw_groups = [players[index:index + 4] for index in range(0, len(players), 4)]
+    group_option_sets = []
+    rank_offset = 0
+
+    for group in raw_groups:
+        if len(group) == 4:
+            # Allowed quartet patterns are intentionally a small curated subset rather than all
+            # 2-vs-2 combinations. They all keep the very top player in the block separated from
+            # the second-best player, but still allow multiple plausible ways to distribute the
+            # remaining strength inside the block.
+            #
+            # Using only a few local patterns keeps the search cheap enough to enumerate while
+            # avoiding the very rigid "adjacent pair must always split" rule from the pairwise
+            # strategy. In practice this gives each 4-player block a couple of different shapes:
+            # "outer vs inner" and "staggered" splits, plus their mirrored orientations.
+            local_patterns = (
+                ((0, 3), (1, 2)),
+                ((1, 2), (0, 3)),
+                ((0, 2), (1, 3)),
+                ((1, 3), (0, 2)),
+            )
+        elif len(group) == 2:
+            # If the player count is not divisible by 4, the final leftover pair is handled like a
+            # tiny block with only the two mirrored 1-vs-1 orientations.
+            local_patterns = (
+                ((0,), (1,)),
+                ((1,), (0,)),
+            )
+        else:
+            raise ValueError("Quartet strategy only supports groups of 4 plus an optional final pair")
+
+        # Each local option is pre-scored so the global search only has to combine block-level
+        # summaries instead of rebuilding the full shape score from scratch every time.
+        group_option_sets.append(_build_local_group_options(group, local_patterns, team_size, rank_offset))
+        rank_offset += len(group) // 2
+
+    results = _search_group_option_sets(group_option_sets, team_size, max_results, verbose=verbose)
+    return _materialize_group_option_results(results)
+
+
+def _iter_adaptive_group_size_layouts(total_players):
+    if total_players == 0:
+        yield ()
+        return
+    for group_size in (2, 4, 6):
+        if total_players >= group_size:
+            for remainder_layout in _iter_adaptive_group_size_layouts(total_players - group_size):
+                yield (group_size,) + remainder_layout
+
+
+def _median_value(values):
+    sorted_values = sorted(values)
+    middle = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[middle]
+    return (sorted_values[middle - 1] + sorted_values[middle]) / 2.0
+
+
+def _percentile_value(values, percentile):
+    sorted_values = sorted(values)
+    index = int(round((len(sorted_values) - 1) * percentile))
+    return sorted_values[index]
+
+
+def _derive_adaptive_layout_penalties(players):
+    adjacent_gaps = [players[index].elo - players[index + 1].elo for index in range(len(players) - 1)]
+    if not adjacent_gaps:
+        return 1.0, 1.0
+
+    median_gap = _median_value(adjacent_gaps)
+    upper_quartile_gap = _percentile_value(adjacent_gaps, 0.75)
+    cut_penalty = max(1.0, upper_quartile_gap)
+    # Two-player blocks are intentionally discouraged a bit more than ordinary cuts so the adaptive
+    # layout does not collapse back into the pairwise strategy unless the lobby has unusually strong
+    # local boundaries that justify it.
+    pair_block_penalty = max(1.0, cut_penalty + (median_gap * 0.5))
+    return cut_penalty, pair_block_penalty
+
+
+def _choose_adaptive_group_sizes(players, verbose=False):
+    cut_penalty, pair_block_penalty = _derive_adaptive_layout_penalties(players)
+    best_layout = None
+    best_key = None
+
+    for layout in _iter_adaptive_group_size_layouts(len(players)):
+        cut_score = 0
+        boundary_index = 0
+        for group_size in layout[:-1]:
+            boundary_index += group_size
+            cut_score += (players[boundary_index - 1].elo - players[boundary_index].elo) - cut_penalty
+        layout_key = (
+            cut_score - (layout.count(2) * pair_block_penalty),
+            -layout.count(2),
+            -len(layout),
+            layout,
+        )
+        if best_key is None or layout_key > best_key:
+            best_key = layout_key
+            best_layout = layout
+    if verbose:
+        print("adaptive layout penalties: cut=%.2f pair=%.2f -> layout=%s" %
+              (cut_penalty, pair_block_penalty, best_layout))
+    return best_layout
+
+
+def balance_players_by_skill_distribution_adaptive_blocks(players, verbose=False, max_results=None):
+    """
+    Adaptive local-group search using a mix of 2-, 4-, and 6-player blocks.
+
+    The block layout is chosen first by looking for strong natural cut points in the sorted elo
+    list. Larger gaps between adjacent players make better boundaries, while 2-player blocks are
+    penalized so they are only used when the partitioning heuristic thinks they are justified.
+    """
+    if max_results is None:
+        max_results = 1
+    players = tuple(sort_by_skill_rating_descending(players))
+    if not players:
+        return []
+    if len(players) % 2 != 0:
+        raise ValueError("balance_players_by_skill_distribution_adaptive_blocks requires an even number of players")
+
+    layout = _choose_adaptive_group_sizes(players, verbose=verbose)
+    team_size = len(players) // 2
+    group_option_sets = []
+    rank_offset = 0
+    player_index = 0
+
+    for group_size in layout:
+        group = players[player_index:player_index + group_size]
+        player_index += group_size
+        if group_size == 2:
+            local_patterns = (
+                ((0,), (1,)),
+                ((1,), (0,)),
+            )
+        elif group_size == 4:
+            local_patterns = (
+                ((0, 3), (1, 2)),
+                ((1, 2), (0, 3)),
+                ((0, 2), (1, 3)),
+                ((1, 3), (0, 2)),
+            )
+        elif group_size == 6:
+            # Six-player blocks allow more local shapes than quartets, but still avoid the full set
+            # of 3-vs-3 splits. These patterns focus on interleaved / staggered distributions so the
+            # block can express several plausible rosters without collapsing into "top three versus
+            # bottom three" style splits.
+            local_patterns = (
+                ((0, 3, 5), (1, 2, 4)),
+                ((1, 2, 4), (0, 3, 5)),
+                ((0, 3, 4), (1, 2, 5)),
+                ((1, 2, 5), (0, 3, 4)),
+                ((0, 2, 5), (1, 3, 4)),
+                ((1, 3, 4), (0, 2, 5)),
+                ((0, 2, 4), (1, 3, 5)),
+                ((1, 3, 5), (0, 2, 4)),
+            )
+        else:
+            raise ValueError("Unsupported adaptive block size: %s" % group_size)
+        group_option_sets.append(_build_local_group_options(group, local_patterns, team_size, rank_offset))
+        rank_offset += group_size // 2
+
+    results = _search_group_option_sets(group_option_sets, team_size, max_results, verbose=verbose)
+    return _materialize_group_option_results(results)
+
+
+def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search_space=True, max_results=None):
+    """
+    Reimplementation of the original unstak idea: bucket players by their relative distance from the
+    input pool mean, then only search bucket-local splits whose running team-size bias stays bounded
+    as we move from strongest buckets to weakest buckets.
+    """
+    if max_results is None:
+        max_results = 1
+    players = tuple(sort_by_skill_rating_descending(players))
+    if not players:
+        return []
+    if len(players) % 2 != 0:
+        raise ValueError("balance_players_by_skill_stddev_buckets requires an even number of players")
+
+    sample_mean = calc_mean(skill_rating_list(players))
+    sample_stdev = calc_standard_deviation(skill_rating_list(players), mean=sample_mean)
+    if verbose:
+        print("sample mean: %.2f" % sample_mean)
+        print("sample stdev: %.2f" % sample_stdev)
+
+    deviation_categories = collections.OrderedDict()
+    for player in players:
+        if sample_stdev == 0:
+            relative_deviation = 0
+        else:
+            relative_deviation = (player.elo - sample_mean) / (sample_stdev * 1.0)
+        deviation_category = int(math.ceil(relative_deviation) if relative_deviation < 0 else math.floor(relative_deviation))
+        if verbose:
+            print("%s(%s): skill=%s stdev=%.2f" % (player.name, player.steam_id, player.elo, relative_deviation))
+        deviation_categories.setdefault(deviation_category, []).append(player)
+
+    if verbose:
+        print(deviation_categories)
+
+    def generate_category_combo_sets(category_players):
+        full_set = list(category_players)
+        low_pick_count = len(full_set) // 2
+        high_pick_count = len(full_set) - low_pick_count
+        seen_splits = set()
+        for pick_count in sorted(set((low_pick_count, high_pick_count))):
+            for combo_indexes in itertools.combinations(range(len(full_set)), pick_count):
+                combo_index_set = frozenset(combo_indexes)
+                if combo_index_set in seen_splits:
+                    continue
+                seen_splits.add(combo_index_set)
+                left_team = tuple(full_set[index] for index in combo_indexes)
+                right_team = tuple(full_set[index] for index in range(len(full_set)) if index not in combo_index_set)
+                yield (left_team, right_team)
+
+    category_generators = [tuple(generate_category_combo_sets(category_players))
+                           for category_players in deviation_categories.values()]
+
+    def search_bucket_combos(use_pruning):
+        results = FixedSizePriorityQueue(max_results)
+        for combo_index, category_pick in enumerate(itertools.product(*category_generators)):
+            running_delta = 0
+            valid_combo = True
+            for team_a_bucket, team_b_bucket in category_pick:
+                category_delta = len(team_b_bucket) - len(team_a_bucket)
+                if use_pruning and abs(category_delta) >= 2:
+                    valid_combo = False
+                    break
+                running_delta += category_delta
+                if use_pruning and abs(running_delta) >= 2:
+                    valid_combo = False
+                    break
+            if not valid_combo:
+                continue
+
+            teams = tuple(tuple(itertools.chain.from_iterable(team)) for team in zip(*category_pick))
+            if len(teams[0]) != len(teams[1]):
+                continue
+            match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
+            results.add_item(((abs(match_prediction.distance), _team_signature(teams[0]), _team_signature(teams[1])),
+                              match_prediction,
+                              teams))
+            if verbose:
+                print("Combo %d : %s" %
+                      (combo_index + 1, describe_balanced_team_combo(teams[0], teams[1], match_prediction)))
+        return results
+
+    results = search_bucket_combos(prune_search_space)
+    if len(results) == 0 and prune_search_space:
+        results = search_bucket_combos(False)
+
+    return [
+        BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction)
+        for _, match_prediction, teams in results.nsmallest()
+    ]
+
+
+def balance_players_by_skill_variance(players, verbose=False, prune_search_space=True, max_results=None,
+                                      strategy=BALANCE_STRATEGY_PAIRWISE):
+    if strategy == BALANCE_STRATEGY_PAIRWISE:
+        return balance_players_by_skill_distribution_pairwise(players, verbose=verbose, max_results=max_results)
+    if strategy == BALANCE_STRATEGY_QUARTETS:
+        return balance_players_by_skill_distribution_quartets(players, verbose=verbose, max_results=max_results)
+    if strategy == BALANCE_STRATEGY_ADAPTIVE_BLOCKS:
+        return balance_players_by_skill_distribution_adaptive_blocks(players, verbose=verbose, max_results=max_results)
+    if strategy == BALANCE_STRATEGY_STDDEV_BUCKETS:
+        return balance_players_by_skill_stddev_buckets(players,
+                                                       verbose=verbose,
+                                                       prune_search_space=prune_search_space,
+                                                       max_results=max_results)
+    raise ValueError("Unknown balance strategy: %s" % strategy)
 
 
 SwitchOperation = collections.namedtuple("SwitchOperation", ["players_affected",

@@ -179,6 +179,45 @@ class UnstakBalanceTest(unittest.TestCase):
         self.assertLess(balance_score_from_elos(*balanced_teams),
                         balance_score_from_elos(uniform_team, skewed_team))
 
+    def test_stddev_bucket_strategy_returns_balanced_partition(self):
+        for test_set in iter_even_sized_tests():
+            players = generate_player_info_list_from_elos(test_set.input_elos)
+            balanced_team_combos = balance_players_by_skill_variance(
+                players,
+                max_results=1,
+                strategy=BALANCE_STRATEGY_STDDEV_BUCKETS,
+            )
+            balanced_teams = balanced_team_combos[0].teams_tup
+            balanced_elos = [sorted_elos(player.elo for player in team) for team in balanced_teams]
+            self.assertEqual(len(balanced_elos[0]), len(balanced_elos[1]), test_set.name)
+            self.assertEqual(sorted(test_set.input_elos), sorted(balanced_elos[0] + balanced_elos[1]), test_set.name)
+
+    def test_quartet_strategy_returns_balanced_partition(self):
+        for test_set in iter_even_sized_tests():
+            players = generate_player_info_list_from_elos(test_set.input_elos)
+            balanced_team_combos = balance_players_by_skill_variance(
+                players,
+                max_results=1,
+                strategy=BALANCE_STRATEGY_QUARTETS,
+            )
+            balanced_teams = balanced_team_combos[0].teams_tup
+            balanced_elos = [sorted_elos(player.elo for player in team) for team in balanced_teams]
+            self.assertEqual(len(balanced_elos[0]), len(balanced_elos[1]), test_set.name)
+            self.assertEqual(sorted(test_set.input_elos), sorted(balanced_elos[0] + balanced_elos[1]), test_set.name)
+
+    def test_adaptive_block_strategy_returns_balanced_partition(self):
+        for test_set in iter_even_sized_tests():
+            players = generate_player_info_list_from_elos(test_set.input_elos)
+            balanced_team_combos = balance_players_by_skill_variance(
+                players,
+                max_results=1,
+                strategy=BALANCE_STRATEGY_ADAPTIVE_BLOCKS,
+            )
+            balanced_teams = balanced_team_combos[0].teams_tup
+            balanced_elos = [sorted_elos(player.elo for player in team) for team in balanced_teams]
+            self.assertEqual(len(balanced_elos[0]), len(balanced_elos[1]), test_set.name)
+            self.assertEqual(sorted(test_set.input_elos), sorted(balanced_elos[0] + balanced_elos[1]), test_set.name)
+
 
 def run_tests():
     pass
