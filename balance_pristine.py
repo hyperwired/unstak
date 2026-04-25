@@ -22,6 +22,7 @@ import itertools
 import threading
 import random
 import time
+import balancer as unstak_balancer
 
 RATING_KEY = "minqlx:players:{0}:ratings:{1}"  # 0 == steam_id, 1 == short gametype.
 MAX_ATTEMPTS = 3
@@ -31,6 +32,7 @@ UNTRACKED_RATING = 9999
 SUPPORTED_GAMETYPES = ("ad", "ca", "ctf", "dom", "ft", "tdm")
 # Externally supported game types. Used by !getrating for game types the API works with.
 EXT_SUPPORTED_GAMETYPES = ("ad", "ca", "ctf", "dom", "ft", "tdm", "duel", "ffa")
+USE_SKILL_DISTRIBUTION_BALANCER = True
 
 
 class balance(minqlxtended.Plugin):
@@ -439,6 +441,79 @@ class balance(minqlxtended.Plugin):
         players = dict([(p.steam_id, gt) for p in teams["red"] + teams["blue"]])
         self.add_request(players, self.callback_balance, minqlxtended.CHAT_CHANNEL)
 
+    def _build_skill_distribution_players(self, teams, gametype):
+        players = {}
+        for team_name in ("red", "blue"):
+            for player in teams[team_name]:
+                players[player.steam_id] = (player.clean_name, self.ratings[player.steam_id][gametype]["elo"], player)
+        return unstak_balancer.player_info_list_from_steam_id_name_ext_obj_elo_dict(players)
+
+    def _map_balanced_teams_to_current_colours(self, teams, balanced_teams):
+        # The balancer returns two unlabeled teams. We deliberately consider both possible
+        # red/blue mappings here so the internal search optimization in balancer.py does not
+        # create a visible fixed-colour bias.
+        current_red_ids = {player.steam_id for player in teams["red"]}
+        current_blue_ids = {player.steam_id for player in teams["blue"]}
+        candidates = (
+            (balanced_teams[0], balanced_teams[1]),
+            (balanced_teams[1], balanced_teams[0]),
+        )
+
+        def moved_player_count(candidate):
+            red_team, blue_team = candidate
+            return (
+                sum(player_info.steam_id not in current_red_ids for player_info in red_team) +
+                sum(player_info.steam_id not in current_blue_ids for player_info in blue_team)
+            )
+
+        best_move_count = min(moved_player_count(candidate) for candidate in candidates)
+        best_candidates = [candidate for candidate in candidates if moved_player_count(candidate) == best_move_count]
+        if len(best_candidates) == 1:
+            return best_candidates[0]
+
+        # When both mappings are equally good, pick one at random so players do not see the
+        # stronger roster consistently associated with the same colour.
+        return random.choice(best_candidates)
+
+    def _report_balanced_team_stats(self, red_team, blue_team, gametype):
+        avg_red = self.team_average(red_team, gametype)
+        avg_blue = self.team_average(blue_team, gametype)
+        diff_rounded = abs(round(avg_red) - round(avg_blue))
+        if round(avg_red) > round(avg_blue):
+            self.msg(f"^1{round(avg_red)} ^7vs ^4{round(avg_blue)}^7 - DIFFERENCE: ^1{diff_rounded}")
+        elif round(avg_red) < round(avg_blue):
+            self.msg(f"^1{round(avg_red)} ^7vs ^4{round(avg_blue)}^7 - DIFFERENCE: ^4{diff_rounded}")
+        else:
+            self.msg(f"^1{round(avg_red)} ^7vs ^4{round(avg_blue)}^7 - Holy shit!")
+
+    def _balance_using_skill_distribution(self, teams, gametype, channel):
+        players_info = self._build_skill_distribution_players(teams, gametype)
+        balanced_team_combos = unstak_balancer.balance_players_by_skill_variance(players_info, max_results=1)
+        if not balanced_team_combos:
+            channel.reply("Teams are good! Nothing to balance.")
+            return True
+
+        mapped_red, mapped_blue = self._map_balanced_teams_to_current_colours(teams, balanced_team_combos[0].teams_tup)
+        new_red_team = [player_info.ext_obj for player_info in mapped_red]
+        new_blue_team = [player_info.ext_obj for player_info in mapped_blue]
+
+        moved_players = False
+        for player in new_red_team:
+            if player.team != "red":
+                player.put("red")
+                moved_players = True
+        for player in new_blue_team:
+            if player.team != "blue":
+                player.put("blue")
+                moved_players = True
+
+        if not moved_players:
+            channel.reply("Teams are good! Nothing to balance.")
+            return True
+
+        self._report_balanced_team_stats(new_red_team, new_blue_team, gametype)
+        return True
+
     def callback_balance(self, players, channel):
         # We check if people joined while we were requesting ratings and get them if someone did.
         teams = self.teams()
@@ -464,6 +539,9 @@ class balance(minqlxtended.Plugin):
                     p = teams["blue"].pop()
                     p.put("red")
                     teams["red"].append(p)
+
+        if USE_SKILL_DISTRIBUTION_BALANCER:
+            return self._balance_using_skill_distribution(teams, gt, channel)
 
         # Start shuffling by looping through our suggestion function until
         # there are no more switches that can be done to improve teams.

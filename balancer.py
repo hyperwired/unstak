@@ -29,8 +29,6 @@ import bisect
 import collections
 import itertools
 import math
-import operator
-import random
 
 def format_obj_desc_str(obj):
     oclass = obj.__class__
@@ -277,12 +275,7 @@ class BalancePrediction(object):
 
 
 def nchoosek(n, r):
-        r = min(r, n - r)
-        if r == 0:
-            return 1
-        numerator = reduce(operator.mul, xrange(n, n - r, -1))
-        denominator = reduce(operator.mul, xrange(1, r + 1))
-        return numerator // denominator
+    return math.comb(n, r)
 
 
 BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "match_prediction"])
@@ -307,131 +300,181 @@ def describe_balanced_team_combo(team_a, team_b, match_prediction):
                                                       match_prediction.describe_prediction_short())
 
 
-def balance_players_by_skill_variance(players, verbose=False, prune_search_space=True, max_results=None):
-    players = sort_by_skill_rating_descending(players)
-    player_stats = collections.OrderedDict()
-    for p in players:
-        player_stats[p.steam_id] = PlayerStats(p)
-
-    # We assume that the skill rating is based on a Gaussian (normal) distribution in the global player population.
-    # The input players is a sample of the actual population, but for the purposes of this algorithm, we treat the
-    # sample as the population, since we are not trying to make inferences on the actual population. We also
-    # assume a normal distribution in the sample to find outlier players, which should be true in most scenarios.
-    sample_mean = calc_mean(skill_rating_list(players))
-    sample_stdev = calc_standard_deviation(skill_rating_list(players), mean=sample_mean)
-
-    if verbose:
-        print "sample mean: %.2f" % sample_mean
-        print "sample stdev: %.2f" % sample_stdev
-
-    # for each player, determine their distance in standard deviations from the sample mean.
-    deviation_categories = collections.OrderedDict()
-    for player_stat in player_stats.values():
-        assert isinstance(player_stat, PlayerStats)
-        player = player_stat.player
-        assert isinstance(player, PlayerInfo)
-        player_stat.relative_deviation = 1.0 * ((player_stat.player.elo - sample_mean) / (sample_stdev * 1.0))
-        print "%s(%d): skill=%s stdev=%.2f" % (player.name, player.steam_id, player.elo, player_stat.relative_deviation)
-        if player_stat.relative_deviation_category not in deviation_categories:
-            deviation_categories[player_stat.relative_deviation_category] = []
-        deviation_categories[player_stat.relative_deviation_category].append(player_stat)
-
-    if verbose:
-        print deviation_categories
-
-    # Do a brute force space search by trying different combos of player picks.
-    #   - Search space reduction techniques:
-    #       - generating combinations (n choose n/2) per standard deviation
-    #       - now do a search through the cartesian product of 1 pick from each stdev combo
-    #       - picks where the distance between left and right teams is more than 2 players per stdev can be ommitted.
-    #   - Define and use a set of heuristics to predict the match quality of each possible teams pick.
-    #   - Only maintain the top N matches in memory/results
-
-    categories = []
-
-    def generate_category_combo_sets(player_stats_list):
-        # generate all combos of 2-team player picks within an stdev skill category
-        full_set = set((player_stat.player.steam_id for player_stat in player_stats_list))
-        if len(full_set) == 1:
-            # handle scenario where there is only one player in the category. Add a dummy None player
-            full_set.add(None)
-        full_list = list(full_set)
-        for category_combo in itertools.combinations(full_list, int(math.ceil(len(full_list)/2.0))):
-            yield (category_combo, tuple(full_set.difference(category_combo)))
-
-    def generate_team_combinations(deviation_categories_dict, total_players, prune_search=False):
-        # generate all valid cross-category 2-team picks via a filtered cartesian product of valid in-category combos.
-        generators = collections.OrderedDict()
-        for deviation_category, player_stats in deviation_categories_dict.items():
-            generators[deviation_category] = generate_category_combo_sets(player_stats)
-
-        # feed the generators into the cartesian product generator
-        for teams_combo in (itertools.product(*generators.values())):
-            running_delta = 0
-            valid_combo = True
-            # strip out dummy/None players
-            strip_none = lambda ps: tuple(p for p in ps if p is not None)
-            teams_combo = tuple((strip_none(team_category[0]), strip_none(team_category[1])) for team_category in teams_combo)
-            counted_players = sum(len(team_category) for team_category in itertools.chain.from_iterable(teams_combo))
-            if prune_search_space:
-                for team_category in teams_combo:
-                    # filter to disallow bias on same team in 2 adjacent skill categories
-                    players_a, players_b = team_category
-                    category_delta = len(players_b) - len(players_a)
-                    if abs(category_delta) >= 2:
-                        valid_combo = False
-                        break
-                    running_delta += category_delta
-                    if abs(running_delta) >= 2:
-                        valid_combo = False
-                        break
-            if valid_combo:
-                yield teams_combo
-
-    def worst_case_search_space_combo_count(players):
-        players_count = len(players)
-        return nchoosek(players_count, int(math.ceil(players_count/2.0)))
-
-    def search_optimal_team_combinations(teams_generator):
-        # iterate through the generated teams, using heuristics to rate them and keep the top N
-        for teams_combo in teams_generator:
-            teams = tuple(tuple(itertools.chain.from_iterable(team)) for team in zip(*teams_combo))
-            yield teams
-
-    def analyze_teams(teams):
-        return BalancePrediction(teams[0], teams[1])
+def _bake_team_stats(team_players):
+    baked = SingleTeamBakedStats()
+    baked.num_players = len(team_players)
+    if not team_players:
+        return baked
+    elos = skill_rating_list(team_players)
+    baked.skill_rating_sum = sum(elos)
+    baked.skill_rating_mean = calc_mean(elos)
+    baked.skill_rating_stdev = calc_standard_deviation(elos, mean=baked.skill_rating_mean) if len(elos) > 1 else 0
+    return baked
 
 
-    total_players = len(players)
-    teams_combos_generator = generate_team_combinations(deviation_categories, total_players, prune_search=prune_search_space)
+def _shape_balance_score(team_a, team_b):
+    # "Rank" here means the player's position inside their own team after sorting by elo:
+    # rank 1 is the strongest player on that team, rank 2 is the next strongest, and so on.
+    # We compare teams rank-by-rank after sorting by elo. This pushes the balancer toward
+    # matching the overall shape of each roster instead of only equalizing team averages.
+    # Example: a rank-1 player is compared with the other team's rank-1 player, rank-2 with
+    # rank-2, etc. That is what helps avoid "one stacked top end plus weak anchors" teams.
+    # The score is ordered from most important to least important:
+    #   1. avoid any single badly mismatched rank pairing
+    #   2. minimize the total weighted rank mismatch, with more weight on stronger players
+    #   3. keep total elo close
+    #   4. keep team spread / variance close
+    sorted_team_a = sort_by_skill_rating_descending(team_a)
+    sorted_team_b = sort_by_skill_rating_descending(team_b)
+    rank_gaps = [abs(player_a.elo - player_b.elo) for player_a, player_b in zip(sorted_team_a, sorted_team_b)]
+    weighted_gap = sum((len(rank_gaps) - index) * gap for index, gap in enumerate(rank_gaps))
+    team_a_stats = _bake_team_stats(sorted_team_a)
+    team_b_stats = _bake_team_stats(sorted_team_b)
+    return (
+        max(rank_gaps) if rank_gaps else 0,
+        weighted_gap,
+        abs(team_a_stats.skill_rating_sum - team_b_stats.skill_rating_sum),
+        abs(team_a_stats.skill_rating_stdev - team_b_stats.skill_rating_stdev),
+    )
 
-    max_iterations = worst_case_search_space_combo_count(players)
-    max_iteration_digits = int(math.log10(max_iterations)+1)
-    FixedSizePriorityQueue(max_results)
 
+def _team_signature(team):
+    sorted_team = sort_by_skill_rating_descending(team)
+    return tuple((player.elo, player.name or "", player.steam_id if player.steam_id is not None else -1)
+                 for player in sorted_team)
+
+
+def _candidate_key(team_a, team_b):
+    return _shape_balance_score(team_a, team_b) + (_team_signature(team_a), _team_signature(team_b))
+
+
+def _pairwise_balance_score(team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, team_size, max_gap, weighted_gap):
+    team_a_mean = team_a_sum / float(team_size)
+    team_b_mean = team_b_sum / float(team_size)
+    team_a_variance = max((team_a_sumsq / float(team_size)) - (team_a_mean * team_a_mean), 0.0)
+    team_b_variance = max((team_b_sumsq / float(team_size)) - (team_b_mean * team_b_mean), 0.0)
+    return (
+        max_gap,
+        weighted_gap,
+        abs(team_a_sum - team_b_sum),
+        abs(math.sqrt(team_a_variance) - math.sqrt(team_b_variance)),
+    )
+
+
+def balance_players_by_skill_distribution(players, verbose=False, max_results=None):
+    """
+    Find the best equal-sized split by comparing the teams rank-by-rank instead of only by average elo.
+
+    "Split" means one possible way of dividing the full player list into two equal-sized unlabeled
+    teams. At this stage the teams are not yet "red" and "blue" - they are just the two halves of
+    a candidate matchup.
+
+    This implementation deliberately searches a reduced space: after sorting all players by elo, it
+    forms adjacent pairs such as (rank 1, rank 2), (rank 3, rank 4), and so on, and only considers
+    splits where each pair is split across the two teams. The search then only decides the
+    orientation of each pair: which teammate from the pair goes to which side.
+
+    The overall approach is:
+      1. sort all players by elo
+      2. build adjacent elo pairs and force each pair to be split across the two teams
+      3. enumerate the 2^(n/2) possible pair orientations
+      4. score each candidate by how well the two teams match by rank / shape
+      5. return the best-scoring split(s)
+
+    Compared with the exact search over all equal-size splits, this keeps the "shape matching"
+    behavior while reducing the worst-case candidate count dramatically. For 24 players the exact
+    split count is C(23, 11) = 1,352,078, while the pair-oriented search checks only 2^12 = 4,096
+    candidates.
+
+    "Rank" here means the player's position inside their own team after sorting by elo: rank 1 is
+    the strongest player on that team, rank 2 is the next strongest, and so on. Because each
+    adjacent input pair is split, a candidate's rank-1 matchup comes from the first pair, rank-2
+    from the second pair, etc. That is what keeps the search focused on plausible shape-matched
+    rosters instead of obviously skewed ones.
+
+    The important difference from average-only balancing is that the score first tries to make the
+    strongest players face similarly strong players, then the second-strongest face each other, and
+    so on. Total elo still matters, but only after the rank distribution already looks sensible.
+
+    Complexity note: the reduced search is O(2^(n/2) * n), which is still exponential, but much
+    smaller than the previous combinatorial exact search. In practice that makes 24-player cases
+    feasible inside a server-frame budget in Python, whereas the exact split enumeration was not.
+    """
+    if max_results is None:
+        max_results = 1
+    players = tuple(sort_by_skill_rating_descending(players))
+    if not players:
+        return []
+    if len(players) % 2 != 0:
+        raise ValueError("balance_players_by_skill_distribution requires an even number of players")
+
+    team_size = len(players) // 2
+    pairs = [players[index:index + 2] for index in range(0, len(players), 2)]
+    pair_elos = [(pair[0].elo, pair[1].elo) for pair in pairs]
+    pair_gaps = [higher_elo - lower_elo for higher_elo, lower_elo in pair_elos]
+    max_gap = max(pair_gaps) if pair_gaps else 0
+    weighted_gap = sum((team_size - index) * gap for index, gap in enumerate(pair_gaps))
     results = FixedSizePriorityQueue(max_results)
 
-    for i, teams in enumerate(search_optimal_team_combinations(teams_combos_generator)):
-        balance_prediction = analyze_teams(teams)
-        assert isinstance(balance_prediction, BalancePrediction)
-        match_prediction = balance_prediction.generate_match_prediction(player_stats)
-        abs_balance_distance = abs(match_prediction.distance)
-        results.add_item((abs_balance_distance, match_prediction, teams))
-        if verbose:
-            combo_desc = str(i+1).ljust(max_iteration_digits, " ")
-            print "Combo %s : %s" % (combo_desc, describe_balanced_team_combo(teams[0], teams[1], match_prediction))
+    for mask in range(1 << team_size):
+        team_a_sum = 0
+        team_b_sum = 0
+        team_a_sumsq = 0
+        team_b_sumsq = 0
+        mask_bits = mask
 
-    # This step seems heavyweight if we are to return a lot of results, so max_results should always be small.
-    # convert it back into a list of players
+        for higher_elo, lower_elo in pair_elos:
+            if mask_bits & 1:
+                team_a_elo, team_b_elo = lower_elo, higher_elo
+            else:
+                team_a_elo, team_b_elo = higher_elo, lower_elo
+            mask_bits >>= 1
+
+            team_a_sum += team_a_elo
+            team_b_sum += team_b_elo
+            team_a_sumsq += team_a_elo * team_a_elo
+            team_b_sumsq += team_b_elo * team_b_elo
+
+        score = _pairwise_balance_score(
+            team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, team_size, max_gap, weighted_gap
+        )
+        results.add_item((score + (mask,), mask))
+        if verbose:
+            team_a = []
+            team_b = []
+            mask_bits = mask
+            for higher_player, lower_player in pairs:
+                if mask_bits & 1:
+                    team_a_player, team_b_player = lower_player, higher_player
+                else:
+                    team_a_player, team_b_player = higher_player, lower_player
+                mask_bits >>= 1
+                team_a.append(team_a_player)
+                team_b.append(team_b_player)
+            match_prediction = generate_match_prediction(_bake_team_stats(team_a), _bake_team_stats(team_b))
+            print("Combo %d : %s" % (mask + 1, describe_balanced_team_combo(team_a, team_b, match_prediction)))
+
     result_combos = []
-    for result in results.nsmallest():
-        teams_as_players = []
-        (abs_balance_distance, match_prediction, teams) = result
-        for team in teams:
-            teams_as_players.append(tuple(player_stats[pid].player for pid in team))
-        team_combo = BalancedTeamCombo(teams_tup=tuple(teams_as_players), match_prediction=match_prediction)
-        result_combos.append(team_combo)
+    for _, mask in results.nsmallest():
+        team_a = []
+        team_b = []
+        mask_bits = mask
+        for higher_player, lower_player in pairs:
+            if mask_bits & 1:
+                team_a_player, team_b_player = lower_player, higher_player
+            else:
+                team_a_player, team_b_player = higher_player, lower_player
+            mask_bits >>= 1
+            team_a.append(team_a_player)
+            team_b.append(team_b_player)
+        teams = (tuple(team_a), tuple(team_b))
+        match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
+        result_combos.append(BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction))
     return result_combos
+
+
+def balance_players_by_skill_variance(players, verbose=False, prune_search_space=True, max_results=None):
+    return balance_players_by_skill_distribution(players, verbose=verbose, max_results=max_results)
 
 
 SwitchOperation = collections.namedtuple("SwitchOperation", ["players_affected",

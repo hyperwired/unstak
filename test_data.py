@@ -1,6 +1,7 @@
 import random
 import math
 import unittest
+import itertools
 from balancer import *
 import collections
 
@@ -95,75 +96,88 @@ def sorted_elos(team):
     return tuple(sorted(team, reverse=True))
 
 
-def confirm_test_set_match(test_set, balanced_teams, test_label="", print_failure=False, print_success=False):
-    balanced_team_a, balanced_team_b = balanced_teams
-    output_set = {sorted_elos(balanced_team_a), sorted_elos(balanced_team_b)}
-    if len(output_set) <= 1:
-        # No players or both teams exactly match
-        return True
-    expected_set = {sorted_elos(test_set.team_a), sorted_elos(test_set.team_b)}
-    success = (expected_set == output_set)
-    do_print = (print_failure and not success) or (print_success and success)
-    if do_print:
-        outcome = "OK" if success else "Failure"
-        label = ("%s: " % test_label) if test_label else ""
-        input_as_set = set((tuple(test_set.input_elos), ))
-        desc = "%s: %s\n\t   input=%s, \n\t  output=%s, \n\texpected=%s" % (outcome, label, input_as_set, output_set, expected_set)
-        print desc
-    if success:
-        return True
-    return False
+def iter_even_sized_tests():
+    for test_set in ELOTestSetRegistry.iter_tests():
+        if len(test_set.input_elos) % 2 == 0:
+            yield test_set
 
 
-def single_elo_test(test_case, print_success=False, **kwargs):
+def balance_score_from_elos(team_a, team_b):
+    team_a = sorted_elos(team_a)
+    team_b = sorted_elos(team_b)
+    rank_gaps = [abs(player_a - player_b) for player_a, player_b in zip(team_a, team_b)]
+
+    def stdev(values):
+        mean = sum(values) / float(len(values))
+        return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+    return (
+        max(rank_gaps) if rank_gaps else 0,
+        sum((len(rank_gaps) - index) * gap for index, gap in enumerate(rank_gaps)),
+        abs(sum(team_a) - sum(team_b)),
+        abs(stdev(team_a) - stdev(team_b)),
+    )
+
+
+def reference_balance_elos(player_elos):
+    sorted_players = sorted_elos(player_elos)
+    team_size = len(sorted_players) // 2
+    anchor_player = sorted_players[0]
+    remaining_players = sorted_players[1:]
+    best_candidate = None
+
+    for combo_indexes in itertools.combinations(range(len(remaining_players)), team_size - 1):
+        combo_index_set = set(combo_indexes)
+        team_a = (anchor_player,) + tuple(remaining_players[index] for index in combo_indexes)
+        team_b = tuple(remaining_players[index] for index in range(len(remaining_players)) if index not in combo_index_set)
+        teams = (sorted_elos(team_a), sorted_elos(team_b))
+        candidate = (balance_score_from_elos(*teams), teams)
+        if best_candidate is None or candidate < best_candidate:
+            best_candidate = candidate
+
+    return best_candidate[1]
+
+
+def single_elo_test(test_case, **kwargs):
     assert isinstance(test_case, ELOBalanceTestSet)
     test_name, elos, expected_a, expected_b = test_case
     players = generate_player_info_list_from_elos(elos)
     balanced_team_combos = balance_players_by_skill_variance(players, **kwargs)
-    balanced_teams = None
-    for i, team_combo in enumerate(balanced_team_combos):
-        assert isinstance(team_combo, BalancedTeamCombo)
-        if i == 0:
-            balanced_teams = team_combo.teams_tup
-        print("results[%d]: %s" % (i, describe_balanced_team_combo(team_combo.teams_tup[0],
-                                                                            team_combo.teams_tup[1],
-                                                                            team_combo.match_prediction)))
-    balanced_team_a, balanced_team_b = balanced_teams
-
-    # since its a convenient place, calculate and present the top switch scenarios:
-    switch_proposals = generate_switch_proposals(balanced_teams, **kwargs)
-
-    #player_dict = {(player.steam_id, player) for player in players}
-
-    # prioritize switch operations that affects the least players (or better to not care about this???)
-    team_names = ["blue", "red"]
-    switch_proposals = sorted(switch_proposals, key=lambda sp: abs(sp.balanced_team_combo.match_prediction.distance))
-    for i, switch_proposal in enumerate(switch_proposals):
-        assert isinstance(switch_proposal, SwitchProposal)
-        switch_operation = switch_proposal.switch_operation
-        switch_team_combo = switch_proposal.balanced_team_combo
-        assert isinstance(switch_operation, SwitchOperation)
-        assert isinstance(switch_team_combo, BalancedTeamCombo)
-        match_prediction = switch_team_combo.match_prediction
-        assert isinstance(match_prediction, MatchPrediction)
-        print("switch option [%d]: %s | %s" %
-              (i, describe_switch_operation(switch_operation, team_names=team_names),
-               match_prediction.describe_prediction_short(team_names=team_names)))
-
-    def elos_only(li):
-        return [i.elo for i in li]
-
-    elos_a, elos_b = elos_only(balanced_team_a), elos_only(balanced_team_b)
-    balanced_elos = (elos_a, elos_b)
-    result = confirm_test_set_match(test_case, balanced_elos, test_label=test_name, print_failure=True, print_success=print_success)
-    return result
+    balanced_teams = balanced_team_combos[0].teams_tup
+    balanced_elos = tuple(sorted_elos(player.elo for player in team) for team in balanced_teams)
+    return balanced_elos, reference_balance_elos(elos)
 
 
 class UnstakBalanceTest(unittest.TestCase):
-    def test_elo_balancing_skill_band(self):
-        for test_set in ELOTestSetRegistry.iter_tests():
-            result = single_elo_test(test_set, print_success=True, max_results=5, verbose=True)
-            #self.assertTrue(result, "Team Mismatch")
+    def test_elo_balancing_matches_reference_search(self):
+        for test_set in iter_even_sized_tests():
+            balanced_elos, reference_elos = single_elo_test(test_set, max_results=1)
+            self.assertEqual({tuple(balanced_elos[0]), tuple(balanced_elos[1])},
+                             {tuple(reference_elos[0]), tuple(reference_elos[1])},
+                             test_set.name)
+
+    def test_balancer_is_input_order_insensitive(self):
+        rng = random.Random(7)
+        for test_set in iter_even_sized_tests():
+            reference_elos = reference_balance_elos(test_set.input_elos)
+            for _ in range(5):
+                shuffled_elos = list(test_set.input_elos)
+                rng.shuffle(shuffled_elos)
+                players = generate_player_info_list_from_elos(shuffled_elos)
+                balanced_team_combos = balance_players_by_skill_variance(players, max_results=1)
+                balanced_teams = balanced_team_combos[0].teams_tup
+                balanced_elos = tuple(sorted_elos(player.elo for player in team) for team in balanced_teams)
+                self.assertEqual({tuple(balanced_elos[0]), tuple(balanced_elos[1])},
+                                 {tuple(reference_elos[0]), tuple(reference_elos[1])},
+                                 test_set.name)
+
+    def test_balancer_prefers_distribution_matching(self):
+        uniform_team = (1450, 1425, 1410, 1390, 1380, 1360)
+        skewed_team = (2200, 1950, 1800, 1100, 750, 600)
+        player_elos = uniform_team + skewed_team
+        balanced_teams = reference_balance_elos(player_elos)
+        self.assertLess(balance_score_from_elos(*balanced_teams),
+                        balance_score_from_elos(uniform_team, skewed_team))
 
 
 def run_tests():
