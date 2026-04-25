@@ -1,10 +1,10 @@
-# ----------------------------------------------------------------------------------------------------------------------
-# unstak: a collection of team balancing algorithms for minqlx created by github/hyperwired aka "stakz", 2016-07-31
+# -----------------------------------------------------------------------------------------------------------
+# unstak: a collection of team balancing algorithms for minqlx created by github/hyperwired aka "stakz"
 # This code is released under the MIT Licence:
 #
 # The MIT License (MIT)
 #
-# Copyright (c) 2016
+# Copyright (c) 2016-2026 github/hyperwired
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-# ----------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------
 import bisect
 import collections
 import itertools
