@@ -2,7 +2,7 @@ import random
 import math
 import unittest
 import itertools
-from balancer import *
+from balancer_unstak import *
 import collections
 
 TEST_PLAYER_NAMES = [

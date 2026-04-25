@@ -22,7 +22,7 @@ import itertools
 import threading
 import random
 import time
-import balancer as unstak_balancer
+import balancer_unstak as unstak_balancer
 
 RATING_KEY = "minqlx:players:{0}:ratings:{1}"  # 0 == steam_id, 1 == short gametype.
 MAX_ATTEMPTS = 3
@@ -450,7 +450,7 @@ class balance(minqlxtended.Plugin):
 
     def _map_balanced_teams_to_current_colours(self, teams, balanced_teams):
         # The balancer returns two unlabeled teams. We deliberately consider both possible
-        # red/blue mappings here so the internal search optimization in balancer.py does not
+        # red/blue mappings here so the internal search optimization in balancer_unstak.py does not
         # create a visible fixed-colour bias.
         current_red_ids = {player.steam_id for player in teams["red"]}
         current_blue_ids = {player.steam_id for player in teams["blue"]}
