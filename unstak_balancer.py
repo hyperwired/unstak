@@ -133,6 +133,47 @@ def calc_standard_deviation(values, mean=None):
 
 BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "balance_distance"])
 
+
+# Balancing strategies in this module:
+# - pairwise:
+#   Sort by elo, split each adjacent pair, and only search the two orientations of each pair.
+#   This is the simplest and most constrained local search. It is usually the easiest to reason
+#   about and is fast enough for live use at full lobby sizes, but it is also the most predictable:
+#   players can often infer that nearby ratings will always be separated.
+#
+# - quartets:
+#   Sort by elo, group players into 4-player blocks, and search a small curated set of 2-vs-2
+#   patterns inside each block. This reduces the "forced pair split" optics while keeping the
+#   candidate count bounded. It is usually a better balance between readability, fairness optics,
+#   and runtime than pairwise.
+#
+# - adaptive_blocks:
+#   Like quartets, but the local block layout can mix 2-, 4-, and 6-player blocks based on gaps in
+#   the sorted lobby. This gives the search more freedom around natural skill boundaries and often
+#   produces the most flexible local-group result, but it adds more heuristics and more complexity
+#   than the fixed-block approaches.
+#
+# - stddev_buckets:
+#   Recreates the original unstak idea by bucketing players by relative deviation from the lobby
+#   mean and then searching bucket-local splits. This tends to be the least predictable socially,
+#   but it is also by far the slowest and least bounded strategy.
+#
+# Practical performance tradeoff:
+# - pairwise, quartets, and adaptive_blocks are intended to stay live-usable even at 24 players.
+#   In the latest benchmark run, representative 24-player cases came out around:
+#     pairwise        10.490 ms (descending) / 21.405 ms (gaussian)
+#     quartets         9.905 ms (descending) /  9.508 ms (gaussian)
+#     adaptive_blocks 10.669 ms (descending) / 10.668 ms (gaussian)
+# - stddev_buckets is dramatically slower. In the same 24-player cases it measured
+#   9434.483 ms and 8508.686 ms, so it is better treated as an experimental / offline strategy
+#   than a default live balancing choice for large lobbies.
+BALANCE_STRATEGY_PAIRWISE = "pairwise"
+BALANCE_STRATEGY_QUARTETS = "quartets"
+BALANCE_STRATEGY_ADAPTIVE_BLOCKS = "adaptive_blocks"
+BALANCE_STRATEGY_STDDEV_BUCKETS = "stddev_buckets"
+BALANCE_STRATEGY_DEFAULT = BALANCE_STRATEGY_ADAPTIVE_BLOCKS
+
+
 def _balance_distance(team_a, team_b):
     team_a_sum = sum(player.elo for player in team_a)
     team_b_sum = sum(player.elo for player in team_b)
@@ -159,13 +200,6 @@ def _pairwise_balance_score(team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, 
         abs(team_a_sum - team_b_sum),
         abs(math.sqrt(team_a_variance) - math.sqrt(team_b_variance)),
     )
-
-
-BALANCE_STRATEGY_PAIRWISE = "pairwise"
-BALANCE_STRATEGY_QUARTETS = "quartets"
-BALANCE_STRATEGY_ADAPTIVE_BLOCKS = "adaptive_blocks"
-BALANCE_STRATEGY_STDDEV_BUCKETS = "stddev_buckets"
-
 
 def _build_local_group_options(group, local_patterns, team_size, rank_offset):
     group_options = []
@@ -591,7 +625,7 @@ def balance_players_by_skill_stddev_buckets(players, prune_search_space=True, ma
 
 
 def balance_players_by_skill_variance(players, prune_search_space=True, max_results=None,
-                                      strategy=BALANCE_STRATEGY_PAIRWISE):
+                                      strategy=BALANCE_STRATEGY_DEFAULT):
     if strategy == BALANCE_STRATEGY_PAIRWISE:
         return balance_players_by_skill_distribution_pairwise(players, max_results=max_results)
     if strategy == BALANCE_STRATEGY_QUARTETS:
