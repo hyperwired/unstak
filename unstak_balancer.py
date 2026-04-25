@@ -1,6 +1,5 @@
-# UNSTAK_START ---------------------------------------------------------------------------------------------------------
-#
-# unstak, an alternative balancing method for minqlx created by github/hyperwired aka "stakz", 2016-07-31
+# ----------------------------------------------------------------------------------------------------------------------
+# unstak: a collection of team balancing algorithms for minqlx created by github/hyperwired aka "stakz", 2016-07-31
 # This code is released under the MIT Licence:
 #
 # The MIT License (MIT)
@@ -1007,4 +1006,3 @@ class Unstaker(object):
             players_signature.add((player.elo, player.elo_variance, player.team_name))
         return players_signature
 
-# UNSTAK_END -----------------------------------------------------------------------------------------------------------
