@@ -133,7 +133,37 @@ def calc_standard_deviation(values, mean=None):
 
 BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "balance_distance"])
 
-
+# This module contains a collection of team balancing algorithms that try to match the "skill distribution shape" 
+# of the teams instead of just their average skill rating. It tries to do this in a way that is:
+# - Ordering-insensitive: the result is not biased to one team based on the input order of the player list.
+# - Deterministic: the same input will generally always produce the same output
+# - Aiming for optimal shape balance: the best possible match according to the shape-based score, within the constraints of the search space.
+# - Not rigidly predictable: reduce the optics of inferable rules that players can easily learn and use to complain about the balance.
+#
+# What differentiates these algorithms is the search space they explore, and how long they take to run. 
+# The most extreme approach is to check every possible split of the player list into two equal-sized teams, 
+# but that is combinatorially explosive and not practical for live use at larger lobby sizes. 
+# The strategies in this module are all designed to explore a reduced search space that still captures a variety of plausible 
+# shape-matched splits while keeping the runtime manageable.
+#
+# -------------------------------------------------------------------------------------------------------------------------------
+# If this sounds over-engineered, then here is a motivating example walking through an initial naive solution one might initially come up with:
+# 1) Sort players decsending by elo and split them into two teams by alternating picks: team A gets ranks 1, 3, 5... and team B gets ranks 2, 4, 6...
+# 2) Now the teams have a predictable "zig-zag" rank order where team A has the most skilled player and team B has the least skilled player. 
+# 3) With this naive approach, Team A will generally beat Team B. So you already have introduced a bias and the teams are inherently unbalanced.
+# 4) To try and improve that, you could try randomly swapping some players between the teams, but then you still need a way to evaluate how good the 
+#   balance is, and know when to stop, and you might end up with a result that is worse than the original zig-zag split. You also might hit a local optimum
+#   where you can't improve the shape by swapping any single pair of players, but you could improve it only by doing multiple swaps or swapping a group of 
+#   players together.
+# 5) Given this progression, you can see how this is a search problem: you have a large space of possible team splits, and you need to search through it 
+# to find the best one, but also you need to be smart about how you search to avoid combinatorial explosion, and you need a scoring function to evaluate 
+# the quality of each candidate split.
+# 6) Add to this the additional constraint of matching the "shape" of the skill distribution of the teams, which means you want to compare 
+# not just the average elo of the teams, but also how the players match up by rank within their teams. This has been shown to produce more 
+# balanced and satisfying matches in practice, and certain real world test cases have been used to validate that the algorithms in this module are 
+# producing better shape matches than the legacy average-based swapping approach.
+# -------------------------------------------------------------------------------------------------------------------------------
+#
 # Balancing strategies in this module:
 # - pairwise:
 #   Sort by elo, split each adjacent pair, and only search the two orientations of each pair.
