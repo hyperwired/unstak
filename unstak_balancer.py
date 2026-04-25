@@ -41,6 +41,8 @@ def format_obj_desc_repr(obj):
 
 
 class PlayerInfo(object):
+    __slots__ = ("_name", "_elo", "_elo_variance", "_steam_id", "_ext_obj")
+
     def __init__(self, name=None, elo=None, elo_variance=0, steam_id=None, ext_obj=None):
         self._name = name
         self._elo = elo
@@ -91,6 +93,8 @@ def player_info_list_from_steam_id_name_ext_obj_elo_dict(d):
 
 
 class FixedSizePriorityQueue(object):
+    __slots__ = ("max_count", "items")
+
     def __init__(self, max_count):
         assert max_count
         self.max_count = max_count
