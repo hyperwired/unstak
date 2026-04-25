@@ -40,58 +40,11 @@ def format_obj_desc_repr(obj):
     return "<%s object @ 0x%x>" % (format_obj_desc_str(obj), id(obj))
 
 
-class PerformanceSnapshot(object):
-    def __init__(self, elo, elo_variance):
+class PlayerInfo(object):
+    def __init__(self, name=None, elo=None, elo_variance=0, steam_id=None, ext_obj=None):
+        self._name = name
         self._elo = elo
         self._elo_variance = elo_variance
-
-    @property
-    def elo(self):
-        return self._elo
-
-    @property
-    def elo_variance(self):
-        return self._elo_variance
-
-    def desc(self):
-        return "elo=%s (~%s)" % (self._elo, self._elo_variance)
-
-    def __str__(self):
-        return format_obj_desc_str(self)
-
-    def __repr__(self):
-        return format_obj_desc_repr(self)
-
-
-class PerformanceHistory(object):
-    def __init__(self):
-        self._snapshots = []
-
-    def has_data(self):
-        return len(self._snapshots)
-
-    def latest_snapshot(self):
-        if self.has_data():
-            return self._snapshots[-1]
-        return None
-
-    def desc(self):
-        latest = self.latest_snapshot()
-        if latest:
-            return "%s, history=%s" % (latest.desc(), len(self._snapshots))
-        return "<empty>"
-
-    def __str__(self):
-        return format_obj_desc_str(self)
-
-    def __repr__(self):
-        return format_obj_desc_repr(self)
-
-
-class PlayerInfo(object):
-    def __init__(self, name=None, perf_history=None, steam_id=None, ext_obj=None):
-        self._name = name
-        self._perf_history = perf_history
         self._steam_id = steam_id
         self._ext_obj = ext_obj
 
@@ -104,27 +57,23 @@ class PlayerInfo(object):
         return self._ext_obj
 
     @property
-    def perf_history(self):
-        return self._perf_history
-
-    @property
     def latest_perf(self):
-        return self._perf_history.latest_snapshot()
+        return self
 
     @property
     def elo(self):
-        return self.latest_perf.elo
+        return self._elo
 
     @property
     def elo_variance(self):
-        return self.latest_perf.elo_variance
+        return self._elo_variance
 
     @property
     def name(self):
         return self._name
 
     def desc(self):
-        return "'%s': %s" % (self._name, self._perf_history.desc())
+        return "'%s': elo=%s (~%s)" % (self._name, self._elo, self._elo_variance)
 
     def __str__(self):
         return format_obj_desc_str(self)
@@ -136,10 +85,7 @@ class PlayerInfo(object):
 def player_info_list_from_steam_id_name_ext_obj_elo_dict(d):
     out = []
     for steam_id, (name, elo, ext_obj) in d.items():
-        perf_snap = PerformanceSnapshot(elo, 0)
-        perf_history = PerformanceHistory()
-        perf_history._snapshots.append(perf_snap)
-        player_info = PlayerInfo(name, perf_history, steam_id=steam_id, ext_obj=ext_obj)
+        player_info = PlayerInfo(name=name, elo=elo, elo_variance=0, steam_id=steam_id, ext_obj=ext_obj)
         out.append(player_info)
     return out
 
@@ -193,91 +139,7 @@ class PlayerStats(object):
         return math.floor(self.relative_deviation)
 
 
-class TeamStats(object):
-    def __init__(self, team_players):
-        self.players = team_players
-
-    def get_elo_list(self, player_stats_dict):
-        return [player_stats_dict[pid].player.elo for pid in self.players]
-
-    def combined_skill_rating(self, player_stats_dict):
-        return sum(self.get_elo_list(player_stats_dict))
-
-    def skill_rating_stdev(self, player_stats_dict):
-        return calc_standard_deviation(self.get_elo_list(player_stats_dict))
-
-
-
-class SingleTeamBakedStats(object):
-    def __init__(self):
-        self.skill_rating_sum = 0
-        self.skill_rating_mean = 0
-        self.skill_rating_stdev = 0
-        self.num_players = 0
-        self.players_by_stdev_rel_server_dict = {}
-        self.players_by_speed_rel_server_dict = {}
-
-
-class MatchPrediction(object):
-    def __init__(self):
-        self.team_a = SingleTeamBakedStats()
-        self.team_b = SingleTeamBakedStats()
-        self.bias = 0
-        self.distance = 0
-        self.confidence = 0
-
-    def describe_prediction_short(self, team_names=None):
-        # assuming bias is in the interval [-1,1], convert it to favoured chance so that
-        # a bias of zero gets presented as a 50%/50% win prediction
-        left_team_desc = ""
-        right_team_desc = ""
-        if team_names:
-            assert len(team_names) == 2
-            left_team_desc = "%s " % team_names[0]
-            right_team_desc = " %s" % team_names[1]
-
-        right_win_chance = self.bias * 100
-        left_win_chance = 100 - right_win_chance
-        return "%s%.2f%%/%.2f%%%s" % (left_team_desc, left_win_chance, right_win_chance, right_team_desc)
-
-    def get_desc(self):
-        raise NotImplementedError
-
-
-def generate_match_prediction(team_a_baked, team_b_baked):
-    assert isinstance(team_a_baked, SingleTeamBakedStats)
-    assert isinstance(team_b_baked, SingleTeamBakedStats)
-    prediction = MatchPrediction()
-    prediction.team_a = team_a_baked
-    prediction.team_b = team_b_baked
-    prediction.bias = (1.0 * team_b_baked.skill_rating_sum) / (team_a_baked.skill_rating_sum + team_b_baked.skill_rating_sum)
-    prediction.distance = (0.5 - prediction.bias)
-    return prediction
-
-
-class BalancePrediction(object):
-    def __init__(self, team_a, team_b):
-        self.team_a_stats = TeamStats(team_a)
-        self.team_b_stats = TeamStats(team_b)
-
-    def generate_match_prediction(self, player_stats_dict):
-        stats = []
-        for team in [self.team_a_stats, self.team_b_stats]:
-            bs = SingleTeamBakedStats()
-            bs.skill_rating_sum = team.combined_skill_rating(player_stats_dict)
-            bs.num_players = len(team.players)
-            assert bs.num_players
-            bs.skill_rating_mean = bs.skill_rating_sum/bs.num_players
-            bs.skill_rating_stdev = team.skill_rating_stdev(player_stats_dict)
-            stats.append(bs)
-        return generate_match_prediction(*stats)
-
-
-def nchoosek(n, r):
-    return math.comb(n, r)
-
-
-BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "match_prediction"])
+BalancedTeamCombo = collections.namedtuple("BalancedTeamCombo", ["teams_tup", "balance_distance"])
 
 
 def player_ids_only(team):
@@ -286,29 +148,13 @@ def player_ids_only(team):
     return team
 
 
-def player_names_and_skill_only(team):
-    if team and isinstance(team[0], PlayerInfo):
-        return " ".join(["%s(%s)" % (p.name, p.elo) for p in team])
-    return team
-
-
-def describe_balanced_team_combo(team_a, team_b, match_prediction):
-    assert isinstance(match_prediction, MatchPrediction)
-    return "Team A: %s | Team B: %s | outcome: %s" % (player_names_and_skill_only(team_a),
-                                                      player_names_and_skill_only(team_b),
-                                                      match_prediction.describe_prediction_short())
-
-
-def _bake_team_stats(team_players):
-    baked = SingleTeamBakedStats()
-    baked.num_players = len(team_players)
-    if not team_players:
-        return baked
-    elos = skill_rating_list(team_players)
-    baked.skill_rating_sum = sum(elos)
-    baked.skill_rating_mean = calc_mean(elos)
-    baked.skill_rating_stdev = calc_standard_deviation(elos, mean=baked.skill_rating_mean) if len(elos) > 1 else 0
-    return baked
+def _balance_distance(team_a, team_b):
+    team_a_sum = sum(player.elo for player in team_a)
+    team_b_sum = sum(player.elo for player in team_b)
+    total = team_a_sum + team_b_sum
+    if total == 0:
+        return 0
+    return abs(0.5 - ((1.0 * team_b_sum) / total))
 
 
 def _shape_balance_score(team_a, team_b):
@@ -327,13 +173,17 @@ def _shape_balance_score(team_a, team_b):
     sorted_team_b = sort_by_skill_rating_descending(team_b)
     rank_gaps = [abs(player_a.elo - player_b.elo) for player_a, player_b in zip(sorted_team_a, sorted_team_b)]
     weighted_gap = sum((len(rank_gaps) - index) * gap for index, gap in enumerate(rank_gaps))
-    team_a_stats = _bake_team_stats(sorted_team_a)
-    team_b_stats = _bake_team_stats(sorted_team_b)
+    team_a_elos = skill_rating_list(sorted_team_a)
+    team_b_elos = skill_rating_list(sorted_team_b)
+    team_a_sum = sum(team_a_elos)
+    team_b_sum = sum(team_b_elos)
+    team_a_stdev = calc_standard_deviation(team_a_elos, mean=calc_mean(team_a_elos)) if len(team_a_elos) > 1 else 0
+    team_b_stdev = calc_standard_deviation(team_b_elos, mean=calc_mean(team_b_elos)) if len(team_b_elos) > 1 else 0
     return (
         max(rank_gaps) if rank_gaps else 0,
         weighted_gap,
-        abs(team_a_stats.skill_rating_sum - team_b_stats.skill_rating_sum),
-        abs(team_a_stats.skill_rating_stdev - team_b_stats.skill_rating_stdev),
+        abs(team_a_sum - team_b_sum),
+        abs(team_a_stdev - team_b_stdev),
     )
 
 
@@ -389,7 +239,7 @@ def _build_local_group_options(group, local_patterns, team_size, rank_offset):
     return tuple(group_options)
 
 
-def _search_group_option_sets(group_option_sets, team_size, max_results, verbose=False):
+def _search_group_option_sets(group_option_sets, team_size, max_results):
     results = FixedSizePriorityQueue(max_results)
 
     for choice_tuple in itertools.product(*group_option_sets):
@@ -415,15 +265,6 @@ def _search_group_option_sets(group_option_sets, team_size, max_results, verbose
         )
         results.add_item((score + (tuple(choice_signature),), choice_tuple))
 
-        if verbose:
-            team_a = []
-            team_b = []
-            for option in choice_tuple:
-                team_a.extend(option["team_a_players"])
-                team_b.extend(option["team_b_players"])
-            match_prediction = generate_match_prediction(_bake_team_stats(team_a), _bake_team_stats(team_b))
-            print("Combo %s : %s" % (tuple(choice_signature), describe_balanced_team_combo(team_a, team_b, match_prediction)))
-
     return results
 
 
@@ -436,12 +277,11 @@ def _materialize_group_option_results(results):
             team_a.extend(option["team_a_players"])
             team_b.extend(option["team_b_players"])
         teams = (tuple(team_a), tuple(team_b))
-        match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
-        result_combos.append(BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction))
+        result_combos.append(BalancedTeamCombo(teams_tup=teams, balance_distance=_balance_distance(teams[0], teams[1])))
     return result_combos
 
 
-def balance_players_by_skill_distribution_pairwise(players, verbose=False, max_results=None):
+def balance_players_by_skill_distribution_pairwise(players, max_results=None):
     """
     Find the best equal-sized split by comparing the teams rank-by-rank instead of only by average elo.
 
@@ -519,20 +359,6 @@ def balance_players_by_skill_distribution_pairwise(players, verbose=False, max_r
             team_a_sum, team_b_sum, team_a_sumsq, team_b_sumsq, team_size, max_gap, weighted_gap
         )
         results.add_item((score + (mask,), mask))
-        if verbose:
-            team_a = []
-            team_b = []
-            mask_bits = mask
-            for higher_player, lower_player in pairs:
-                if mask_bits & 1:
-                    team_a_player, team_b_player = lower_player, higher_player
-                else:
-                    team_a_player, team_b_player = higher_player, lower_player
-                mask_bits >>= 1
-                team_a.append(team_a_player)
-                team_b.append(team_b_player)
-            match_prediction = generate_match_prediction(_bake_team_stats(team_a), _bake_team_stats(team_b))
-            print("Combo %d : %s" % (mask + 1, describe_balanced_team_combo(team_a, team_b, match_prediction)))
 
     result_combos = []
     for _, mask in results.nsmallest():
@@ -548,12 +374,11 @@ def balance_players_by_skill_distribution_pairwise(players, verbose=False, max_r
             team_a.append(team_a_player)
             team_b.append(team_b_player)
         teams = (tuple(team_a), tuple(team_b))
-        match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
-        result_combos.append(BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction))
+        result_combos.append(BalancedTeamCombo(teams_tup=teams, balance_distance=_balance_distance(teams[0], teams[1])))
     return result_combos
 
 
-def balance_players_by_skill_distribution_quartets(players, verbose=False, max_results=None):
+def balance_players_by_skill_distribution_quartets(players, max_results=None):
     """
     Reduced local-group search using 4-player blocks. Each quartet contributes two players to each
     side using a small set of plausible 2-vs-2 patterns, and if the total player count is not
@@ -608,7 +433,7 @@ def balance_players_by_skill_distribution_quartets(players, verbose=False, max_r
         group_option_sets.append(_build_local_group_options(group, local_patterns, team_size, rank_offset))
         rank_offset += len(group) // 2
 
-    results = _search_group_option_sets(group_option_sets, team_size, max_results, verbose=verbose)
+    results = _search_group_option_sets(group_option_sets, team_size, max_results)
     return _materialize_group_option_results(results)
 
 
@@ -651,7 +476,7 @@ def _derive_adaptive_layout_penalties(players):
     return cut_penalty, pair_block_penalty
 
 
-def _choose_adaptive_group_sizes(players, verbose=False):
+def _choose_adaptive_group_sizes(players):
     cut_penalty, pair_block_penalty = _derive_adaptive_layout_penalties(players)
     best_layout = None
     best_key = None
@@ -671,13 +496,10 @@ def _choose_adaptive_group_sizes(players, verbose=False):
         if best_key is None or layout_key > best_key:
             best_key = layout_key
             best_layout = layout
-    if verbose:
-        print("adaptive layout penalties: cut=%.2f pair=%.2f -> layout=%s" %
-              (cut_penalty, pair_block_penalty, best_layout))
     return best_layout
 
 
-def balance_players_by_skill_distribution_adaptive_blocks(players, verbose=False, max_results=None):
+def balance_players_by_skill_distribution_adaptive_blocks(players, max_results=None):
     """
     Adaptive local-group search using a mix of 2-, 4-, and 6-player blocks.
 
@@ -693,7 +515,7 @@ def balance_players_by_skill_distribution_adaptive_blocks(players, verbose=False
     if len(players) % 2 != 0:
         raise ValueError("balance_players_by_skill_distribution_adaptive_blocks requires an even number of players")
 
-    layout = _choose_adaptive_group_sizes(players, verbose=verbose)
+    layout = _choose_adaptive_group_sizes(players)
     team_size = len(players) // 2
     group_option_sets = []
     rank_offset = 0
@@ -734,11 +556,11 @@ def balance_players_by_skill_distribution_adaptive_blocks(players, verbose=False
         group_option_sets.append(_build_local_group_options(group, local_patterns, team_size, rank_offset))
         rank_offset += group_size // 2
 
-    results = _search_group_option_sets(group_option_sets, team_size, max_results, verbose=verbose)
+    results = _search_group_option_sets(group_option_sets, team_size, max_results)
     return _materialize_group_option_results(results)
 
 
-def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search_space=True, max_results=None):
+def balance_players_by_skill_stddev_buckets(players, prune_search_space=True, max_results=None):
     """
     Reimplementation of the original unstak idea: bucket players by their relative distance from the
     input pool mean, then only search bucket-local splits whose running team-size bias stays bounded
@@ -754,10 +576,6 @@ def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search
 
     sample_mean = calc_mean(skill_rating_list(players))
     sample_stdev = calc_standard_deviation(skill_rating_list(players), mean=sample_mean)
-    if verbose:
-        print("sample mean: %.2f" % sample_mean)
-        print("sample stdev: %.2f" % sample_stdev)
-
     deviation_categories = collections.OrderedDict()
     for player in players:
         if sample_stdev == 0:
@@ -765,12 +583,7 @@ def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search
         else:
             relative_deviation = (player.elo - sample_mean) / (sample_stdev * 1.0)
         deviation_category = int(math.ceil(relative_deviation) if relative_deviation < 0 else math.floor(relative_deviation))
-        if verbose:
-            print("%s(%s): skill=%s stdev=%.2f" % (player.name, player.steam_id, player.elo, relative_deviation))
         deviation_categories.setdefault(deviation_category, []).append(player)
-
-    if verbose:
-        print(deviation_categories)
 
     def generate_category_combo_sets(category_players):
         full_set = list(category_players)
@@ -810,13 +623,10 @@ def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search
             teams = tuple(tuple(itertools.chain.from_iterable(team)) for team in zip(*category_pick))
             if len(teams[0]) != len(teams[1]):
                 continue
-            match_prediction = generate_match_prediction(_bake_team_stats(teams[0]), _bake_team_stats(teams[1]))
-            results.add_item(((abs(match_prediction.distance), _team_signature(teams[0]), _team_signature(teams[1])),
-                              match_prediction,
+            balance_distance = _balance_distance(teams[0], teams[1])
+            results.add_item(((balance_distance, _team_signature(teams[0]), _team_signature(teams[1])),
+                              balance_distance,
                               teams))
-            if verbose:
-                print("Combo %d : %s" %
-                      (combo_index + 1, describe_balanced_team_combo(teams[0], teams[1], match_prediction)))
         return results
 
     results = search_bucket_combos(prune_search_space)
@@ -824,22 +634,21 @@ def balance_players_by_skill_stddev_buckets(players, verbose=False, prune_search
         results = search_bucket_combos(False)
 
     return [
-        BalancedTeamCombo(teams_tup=teams, match_prediction=match_prediction)
-        for _, match_prediction, teams in results.nsmallest()
+        BalancedTeamCombo(teams_tup=teams, balance_distance=balance_distance)
+        for _, balance_distance, teams in results.nsmallest()
     ]
 
 
-def balance_players_by_skill_variance(players, verbose=False, prune_search_space=True, max_results=None,
+def balance_players_by_skill_variance(players, prune_search_space=True, max_results=None,
                                       strategy=BALANCE_STRATEGY_PAIRWISE):
     if strategy == BALANCE_STRATEGY_PAIRWISE:
-        return balance_players_by_skill_distribution_pairwise(players, verbose=verbose, max_results=max_results)
+        return balance_players_by_skill_distribution_pairwise(players, max_results=max_results)
     if strategy == BALANCE_STRATEGY_QUARTETS:
-        return balance_players_by_skill_distribution_quartets(players, verbose=verbose, max_results=max_results)
+        return balance_players_by_skill_distribution_quartets(players, max_results=max_results)
     if strategy == BALANCE_STRATEGY_ADAPTIVE_BLOCKS:
-        return balance_players_by_skill_distribution_adaptive_blocks(players, verbose=verbose, max_results=max_results)
+        return balance_players_by_skill_distribution_adaptive_blocks(players, max_results=max_results)
     if strategy == BALANCE_STRATEGY_STDDEV_BUCKETS:
         return balance_players_by_skill_stddev_buckets(players,
-                                                       verbose=verbose,
                                                        prune_search_space=prune_search_space,
                                                        max_results=max_results)
     raise ValueError("Unknown balance strategy: %s" % strategy)
@@ -897,12 +706,11 @@ def describe_switch_operation(switch_op, team_names=None):
     return "".join(out)
 
 
-def generate_switch_proposals(teams, verbose=False, max_results=5):
+def generate_switch_proposals(teams, max_results=5):
     # add 1 to max results, because if the input teams are optimal, then they will come as a result.
     players = []
     [[players.append(p) for p in team_players] for team_players in teams]
     balanced_team_combos = balance_players_by_skill_variance(players,
-                                                             verbose=verbose,
                                                              prune_search_space=True,
                                                              max_results=max_results+1)
     switch_proposals = []

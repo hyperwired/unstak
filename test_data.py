@@ -23,10 +23,7 @@ def generate_player_set(num_players=10, random_elos=True):
     for player in players:
         elo = clamp(random.gauss(1400, 380), min_value=600, max_value=2700)
         elo_confidence = clamp(random.gauss(55, 40), min_value=20, max_value=150)
-        perf_snap = PerformanceSnapshot(elo, elo_confidence)
-        perf_history = PerformanceHistory()
-        perf_history._snapshots.append(perf_snap)
-        player_info = PlayerInfo(player, perf_history)
+        player_info = PlayerInfo(name=player, elo=elo, elo_variance=elo_confidence)
         player_infos.append(player_info)
 
     return player_infos

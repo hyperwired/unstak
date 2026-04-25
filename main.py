@@ -1,4 +1,3 @@
-from player_info import *
 from unstak_balancer import *
 import test_data
 
@@ -24,7 +23,7 @@ def print_team_stats(team_players):
 def print_team(team_players, print_stats=True):
     for player in sort_by_skill_rating_descending(team_players):
         assert isinstance(player, PlayerInfo)
-        print "%s:%s" % (player.name, player.latest_perf._elo)
+        print "%s:%s" % (player.name, player.elo)
     if print_stats:
         print_team_stats(team_players)
 
@@ -74,7 +73,7 @@ def print_teams(teams):
     TestPrinter().report_team_stats(team_a, team_b)
 
 
-snap = PerformanceSnapshot(1600, 50)
+snap = PlayerInfo(name="example", elo=1600, elo_variance=50)
 print snap
 
 #players = test_data.generate_player_set()
